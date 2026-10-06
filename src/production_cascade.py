@@ -1,181 +1,207 @@
 """
-production_cascade.py — downstream THRESHOLD CASCADE into the economy
-CITS4403 — Raed
+production_cascade.py - Layer 3: how an oil shortfall spreads through the economy,
+plus the main experiments (the threshold, interventions, reserve hold time).
+CITS4403 - Raed
 
-Replicates the structure of Zhang et al. (2026, Mathematics 14:1708):
-a threshold-cascade framework with sector inventories and *smooth operability
-bands*, used to find the BLOCKADE INTENSITY at which a localised chokepoint
-shock becomes systemic production loss. They report a critical band of 32-46%.
+Follows the structure of the threshold-cascade framework of An et al. (2026,
+Mathematics 14:1708): sectors with "operability bands", linked so that one
+sector's failure reduces the next sector's inputs. Used to find the closure
+level at which a local oil shortage becomes SYSTEMIC production failure.
 
-Our version:
-  - sectors weighted by real oil shares (IEA/OPEC/EIA)
-  - each sector has an operability band: output falls smoothly as input drops,
-    and the sector FAILS below a minimum operable level
-  - sectors depend on each other (input-output style), so failure PROPAGATES
-  - transport is the hub: 92% of its energy is oil and nearly every other
-    sector needs it to move goods -> transport failure cascades widely
-
-Extension beyond the paper: we compare the three real interventions
-(reserve release, demand restraint, bypass capacity) by how much each shifts
-the critical blockade intensity.
+Main functions
+  operability()                  input share -> output share for one sector
+  run_production_cascade()       spread a shortfall through the 5 sectors
+  regional_cascade()             run the network, then the cascade, per region
+  critical_blockade_intensity()  the threshold, found by bisection
+  compare_interventions()        bypass vs demand restraint vs reserves
+  reserve_hold_time()            how long reserves keep the system below systemic
 """
 
-import numpy as np
-from oil_model_data import *
+import numpy as np                      # maths: exp, clip
+from oil_model_data import *            # model constants
 
-# --- sector oil shares (fraction of total oil demand) -------------- [S33-S35]
+# Each sector's share of world oil use - also used as its WEIGHT in the loss.
 SECTORS = {
     "Transport":      0.57,   # OPEC 2024: >57% of global oil demand
-    "Petrochemicals": 0.21,   # "non-energy uses" (feedstock)
-    "Industry":       0.07,
-    "Agri/Residential": 0.11,
-    "Power":          0.04,
+    "Petrochemicals": 0.21,   # oil used as raw material (plastics, chemicals)
+    "Industry":       0.07,   # manufacturing
+    "Agri/Residential": 0.11, # farming and heating
+    "Power":          0.04,   # electricity generation
 }
 
-# How substitutable is oil in each sector? (1 = no substitute at all)
-# Oil is 92% of transport energy -> essentially no substitute.
+# How much of each sector's energy comes from oil (1 = no substitute at all).
 OIL_DEPENDENCE = {
-    "Transport":      0.92,
-    "Petrochemicals": 0.95,   # feedstock: cannot be substituted at all
-    "Industry":       0.45,
+    "Transport":      0.92,   # oil is 92% of transport energy
+    "Petrochemicals": 0.95,   # oil is the feedstock itself
+    "Industry":       0.45,   # can partly use gas, coal, electricity
     "Agri/Residential": 0.40,
     "Power":          0.10,   # power has many alternatives
 }
 
-# Inter-sector dependency: sector -> {supplier: how much it needs them}
-# (simplified input-output structure)
+# How much each sector needs the OTHER sectors (a simple input-output table).
+# e.g. Industry needs Transport 0.45, Petrochemicals 0.35, Power 0.30.
 DEPENDS_ON = {
-    "Transport":        {},
+    "Transport":        {},                                                   # needs nothing from the others
     "Petrochemicals":   {"Transport": 0.30, "Power": 0.25},
     "Industry":         {"Transport": 0.45, "Petrochemicals": 0.35, "Power": 0.30},
-    "Agri/Residential": {"Transport": 0.50, "Petrochemicals": 0.30},  # fertiliser
+    "Agri/Residential": {"Transport": 0.50, "Petrochemicals": 0.30},          # fertiliser comes from petrochemicals
     "Power":            {"Transport": 0.20},
 }
 
-# Operability band: a sector keeps running (degraded) down to this input level;
-# below it, the sector cannot operate at all.  (Zhang et al. use "smooth
-# operability bands" - we use a logistic band rather than a hard cutoff.)
-OPERABLE_MIN   = 0.45     # below 45% of normal input -> failure
-BAND_SMOOTHNESS = 0.06    # width of the smooth transition
+OPERABLE_MIN   = 0.45     # [ASSUMPTION] a sector shuts down below ~45% of its normal inputs
+BAND_SMOOTHNESS = 0.06    # [ASSUMPTION] how gradual that shutdown is (smaller = sharper)
 
 
 def operability(input_ratio):
-    """Smooth operability band: output fraction given input fraction.
+    """Turn a sector's input share (0..1) into its output share (0..1).
 
-    Two effects combine:
-      - PROPORTIONAL degradation: with 70% of its fuel a sector does ~70% of
-        its work (an essential input with no substitute cannot be stretched).
-      - CATASTROPHIC failure: below OPERABLE_MIN the sector cannot run at all
-        (minimum technical operating level), smoothed rather than a hard step.
+    Two effects multiplied together:
+      input_ratio  proportional: 70% of the inputs gives about 70% of the output
+      gate         an S-curve that is ~1 above OPERABLE_MIN and ~0 below it:
+                   below a minimum, the sector cannot operate at all
     """
-    gate = 1.0 / (1.0 + np.exp(-(input_ratio - OPERABLE_MIN) / BAND_SMOOTHNESS))
-    return float(np.clip(input_ratio, 0, 1) * gate)
+    gate = 1.0 / (1.0 + np.exp(-(input_ratio - OPERABLE_MIN) / BAND_SMOOTHNESS))   # the S-shaped on/off switch
+    return float(np.clip(input_ratio, 0, 1) * gate)                                # proportional output x switch
 
 
 def run_production_cascade(oil_available_fraction, max_rounds=50,
                            inventory_rounds=0):
-    """Propagate an oil shortfall through the production network.
+    """Spread an oil shortfall through the five sectors until it settles.
 
-    oil_available_fraction : fraction of normal oil supply still delivered
-    inventory_rounds       : sector inventories delay the onset of failure
-    returns (systemic_output_loss, per-sector output)
+    oil_available_fraction  share of the region's oil need that is met (0..1)
+    inventory_rounds        rounds in which stocks soften the hit (0 = not used)
+    Returns (systemic loss, output of each sector).
     """
-    output = {s: 1.0 for s in SECTORS}
+    output = {s: 1.0 for s in SECTORS}                    # start: every sector at full output
 
-    for rnd in range(max_rounds):
-        new_output = {}
+    for rnd in range(max_rounds):                         # repeat until nothing changes (fixed-point iteration)
+        new_output = {}                                   # this round's outputs
         for s in SECTORS:
-            # 1. direct oil input to this sector
-            oil_input = oil_available_fraction
-            # a sector only suffers to the extent it depends on oil
-            direct = 1.0 - OIL_DEPENDENCE[s] * (1.0 - oil_input)
+            oil_input = oil_available_fraction            # how much of its oil this sector gets
+            direct = 1.0 - OIL_DEPENDENCE[s] * (1.0 - oil_input)   # damage from its OWN oil shortage
 
-            # 2. inputs from OTHER sectors (this is the cascade channel)
-            upstream = 1.0
+            upstream = 1.0                                # start with full supply from other sectors...
             for supplier, intensity in DEPENDS_ON[s].items():
-                upstream -= intensity * (1.0 - output[supplier])
-            upstream = max(0.0, upstream)
+                upstream -= intensity * (1.0 - output[supplier])   # ...minus damage from each supplier that has failed
+            upstream = max(0.0, upstream)                 # can't go below zero
 
-            # 3. the binding input is the worse of the two
-            effective_input = min(direct, upstream)
+            effective_input = min(direct, upstream)       # the WORSE of the two limits it
 
-            # 4. inventories delay failure in the early rounds
-            if rnd < inventory_rounds:
+            if rnd < inventory_rounds:                    # optional: stocks soften early rounds (off by default)
                 effective_input = min(1.0, effective_input + 0.2)
 
-            new_output[s] = float(operability(effective_input))
+            new_output[s] = float(operability(effective_input))   # inputs -> output through the gate
 
-        # converged?
-        if max(abs(new_output[s] - output[s]) for s in SECTORS) < 1e-6:
+        if max(abs(new_output[s] - output[s]) for s in SECTORS) < 1e-6:   # settled? (nothing moved)
             output = new_output
-            break
-        output = new_output
+            break                                         # stop iterating
+        output = new_output                               # otherwise use these outputs as next round's inputs
 
-    # systemic loss, weighted by each sector's economic weight (oil share proxy)
-    systemic = sum(SECTORS[s] * (1.0 - output[s]) for s in SECTORS)
+    systemic = sum(SECTORS[s] * (1.0 - output[s]) for s in SECTORS)   # SYSTEMIC LOSS: weighted lost output
     return systemic, output
 
 
-def regional_cascade(blockade_intensity, supply_buffer=0.0):
-    """Run the production cascade SEPARATELY for each region, using that
-    region's actual shortfall from the network model.
+def regional_cascade(blockade_intensity, supply_buffer=0.0, intervention=None):
+    """Run the network to steady state, then the sector cascade for EACH region.
 
-    This is the key step: a Hormuz closure is not felt evenly. Asia loses a
-    large share of its oil and its transport sector drops below the operability
-    band; North America barely moves. Systemic loss is therefore concentrated.
+    blockade_intensity  share of Hormuz CLOSED (0..1)
+    intervention        optional {"bypass_extra": mb/d, "demand_cut": share,
+                        "reserve_scale": multiplier} - each through its real channel
+    Returns {region: {oil_available, systemic_loss, sectors}}.
     """
-    from oil_network_model import OilNetworkModel, REGION_DEMAND
-    m = OilNetworkModel()
-    for _ in range(150):
-        unserved, _, _ = m.step(1.0 - blockade_intensity)
+    import oil_network_model as NM                        # the network model
+    from oil_model_data import REGIONAL_DRAW_RATE         # reserve draw rates
+    iv = intervention or {}                               # no intervention = empty dict
+    old_pipes, old_demand = dict(NM.SHARED_PIPELINES), dict(NM.REGION_DEMAND)   # save originals so we can restore them
+    try:
+        NM.SHARED_PIPELINES["SaudiPipe"] = old_pipes["SaudiPipe"] + iv.get("bypass_extra", 0.0)   # BYPASS: a bigger Saudi pipeline
+        cut = iv.get("demand_cut", 0.0)                   # DEMAND RESTRAINT: share every region cuts
+        for r in NM.REGION_DEMAND:
+            NM.REGION_DEMAND[r] = old_demand[r] * (1.0 - cut)   # applied inside the network, so freed oil can move
+        m = NM.OilNetworkModel()                          # fresh model for this scenario
+        for _ in range(150):                              # run 150 days to steady state
+            unserved, _, _ = m.step(1.0 - blockade_intensity)   # step() takes the OPEN share, so 1 - closed
+        demand = dict(NM.REGION_DEMAND)                   # demand used in this run
+    finally:
+        NM.SHARED_PIPELINES.update(old_pipes)             # always put the originals back
+        NM.REGION_DEMAND.update(old_demand)
 
     out = {}
-    for r, short in unserved.items():
-        relief = REGION_DEMAND[r] * supply_buffer
-        net_short = max(0.0, short - relief)
-        avail = 1.0 - net_short / REGION_DEMAND[r] if REGION_DEMAND[r] else 1.0
-        sysl, sectors = run_production_cascade(avail)
+    for r, short in unserved.items():                     # for each region's shortfall...
+        relief = demand[r] * supply_buffer                # optional generic buffer (0 by default)
+        rate = REGIONAL_DRAW_RATE.get(r, 0.0) * iv.get("reserve_scale", 0.0)   # RESERVES: own reserve's draw rate
+        relief += min(short, rate)                        # a reserve can't cover more than the shortfall
+        net_short = max(0.0, short - relief)              # what is still missing
+        avail = 1.0 - net_short / demand[r] if demand[r] else 1.0   # share of oil need met
+        sysl, sectors = run_production_cascade(avail)     # spread it through the economy
         out[r] = dict(oil_available=avail, systemic_loss=sysl, sectors=sectors)
     return out
 
 
-def critical_blockade_intensity(supply_buffer=0.0, threshold=0.10):
-    """Find the blockade intensity at which systemic production loss exceeds
-    `threshold` (10% of weighted output) - the paper's key quantity.
+def critical_blockade_intensity(supply_buffer=0.0, threshold=0.10, intervention=None,
+                                precision_steps=12):
+    """THE THRESHOLD: the share of Hormuz closed at which the worst-hit region
+    first loses more than 10% of its weighted output.
 
-    supply_buffer: extra oil supply available from an intervention, as a
-    fraction of Hormuz flow (reserves, demand restraint, bypass).
+    Found by BISECTION: start with 0..1, test the middle, keep the half that
+    contains the answer, repeat 12 times (precision ~0.02%). Valid because
+    damage only rises as closure rises (checked in test_model.py).
+    Returns None if even full closure stays below the threshold.
     """
-    for b in np.linspace(0, 1.0, 51):
-        res = regional_cascade(b, supply_buffer)
-        # worst-affected region defines when the shock becomes systemic
-        worst = max(v["systemic_loss"] for v in res.values())
-        if worst > threshold:
-            return b
-    return None
+    def worst(b):                                         # worst region's systemic loss at closure b
+        res = regional_cascade(b, supply_buffer, intervention)
+        return max(v["systemic_loss"] for v in res.values())
+    if worst(1.0) <= threshold:                           # even fully closed isn't systemic?
+        return None                                       # then there is no threshold
+    lo, hi = 0.0, 1.0                                     # the answer lies between 0% and 100% closed
+    for _ in range(precision_steps):
+        mid = 0.5 * (lo + hi)                             # test the middle
+        if worst(mid) > threshold:                        # already systemic here?
+            hi = mid                                      # then the threshold is at or below mid
+        else:
+            lo = mid                                      # otherwise it's above mid
+    return hi                                             # the first closure found to be systemic
 
 
-if __name__ == "__main__":
+def compare_interventions():
+    """How far each real intervention raises the threshold.
+      equal size (~3 mb/d each) -> which is most effective per barrel?
+      realistic size             -> which helps most in practice?
+    """
+    from oil_model_data import REGIONAL_DRAW_RATE
+    total_rate = sum(REGIONAL_DRAW_RATE.values())         # all regions' reserve draw rates together (~11 mb/d)
+    cases = [                                             # (label, size group, intervention)
+        ("Baseline",                       "-",         {}),
+        ("Bypass +3 mb/d",                 "equal",     dict(bypass_extra=3.0)),
+        ("Demand restraint 2.9%",          "equal",     dict(demand_cut=3.0 / 102.0)),          # 2.9% of ~102 = 3 mb/d
+        ("Reserves at 3 mb/d total",       "equal",     dict(reserve_scale=3.0 / total_rate)),  # scale rates down to 3 mb/d
+        ("Bypass +2 mb/d",                 "realistic", dict(bypass_extra=2.0)),
+        ("Demand restraint 3%",            "realistic", dict(demand_cut=0.03)),
+        ("Reserves, realistic ~11 mb/d",   "realistic", dict(reserve_scale=1.0)),
+        ("All three combined",             "realistic", dict(bypass_extra=2.0, reserve_scale=1.0,
+                                                             demand_cut=0.03)),
+    ]
+    rows, base = [], None
+    for name, size, iv in cases:
+        c = critical_blockade_intensity(intervention=iv)  # the threshold with this intervention
+        base = c if base is None else base                # the first case (baseline) is the reference
+        rows.append(dict(name=name, size=size, threshold=c, shift=c - base))   # how far it moved
+    return rows
+
+
+if __name__ == "__main__":                                # only when run directly
     print("Sector oil shares:", SECTORS)
     print(f"Operability band: sectors fail below {OPERABLE_MIN:.0%} of input\n")
 
-    print("Blockade intensity -> systemic production loss")
-    print(f"{'blocked':>9}{'oil avail':>11}{'systemic loss':>15}   failed sectors")
-    for b in [0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0]:
-        avail = 1.0 - (HORMUZ_TOTAL_FLOW * b) / WORLD_CONSUMPTION
-        sysl, out = run_production_cascade(avail)
-        failed = [s for s, v in out.items() if v < 0.5]
-        print(f"{b:>8.0%}{avail:>11.1%}{sysl:>15.1%}   {failed}")
-
     print("\n--- REGIONAL cascade (the shock is not felt evenly) ---")
-    for b in [0.4, 0.6, 0.8, 1.0]:
+    for b in [0.4, 0.6, 0.8, 1.0]:                        # a few closure levels
         res = regional_cascade(b)
         line = "  ".join(f"{r}: {v['systemic_loss']:.0%}" for r, v in res.items())
         print(f"  blockade {b:>4.0%} | {line}")
 
     print("\n--- worst-affected region, sector by sector (full closure) ---")
     res = regional_cascade(1.0)
-    worst = max(res, key=lambda r: res[r]["systemic_loss"])
+    worst = max(res, key=lambda r: res[r]["systemic_loss"])   # the hardest-hit region
     print(f"  {worst}: oil available {res[worst]['oil_available']:.0%}")
     for s, v in res[worst]["sectors"].items():
         flag = "  <-- FAILED" if v < 0.5 else ""
@@ -183,4 +209,30 @@ if __name__ == "__main__":
 
     crit = critical_blockade_intensity()
     print(f"\nCRITICAL BLOCKADE INTENSITY: {crit:.0%}" if crit else "\nno critical point found")
-    print("(Zhang et al. 2026 report a critical band of 32-46%)")
+    print("(An et al. 2026 report a critical band of 32-46%)")
+
+
+def reserve_hold_time(blockade, days=400):
+    """How long realistic regional reserves keep a closure below systemic.
+
+    Day by day, each region draws only on its OWN reserve. Records the worst
+    region's systemic loss each day and the day each reserve runs out.
+    Returns (list of daily worst loss, {region: day its reserve ran out}).
+    """
+    import oil_network_model as NM
+    from oil_model_data import REGIONAL_RESERVES, REGIONAL_DRAW_RATE
+    m = NM.OilNetworkModel()                              # fresh model
+    left = dict(REGIONAL_RESERVES)                        # each region's reserve remaining, Mb
+    worst, exhausted = [], {}                             # daily worst loss; day each reserve emptied
+    for d in range(1, days + 1):                          # one loop = one day
+        unserved, _, _ = m.step(1.0 - blockade)           # today's shortfalls (step takes the OPEN share)
+        w = 0.0                                           # worst loss today
+        for r, miss in unserved.items():
+            draw = min(miss, REGIONAL_DRAW_RATE.get(r, 0.0), max(0.0, left.get(r, 0.0)))   # draw: need, rate limit, what's left
+            left[r] = left.get(r, 0.0) - draw             # 1 mb/d for 1 day = 1 Mb out of the reserve
+            if REGIONAL_RESERVES.get(r, 0) > 0 and left[r] <= 0.01 and r not in exhausted:
+                exhausted[r] = d                          # record the first day it ran dry
+            net = max(0.0, miss - draw)                   # shortfall after the reserve
+            w = max(w, run_production_cascade(1.0 - net / NM.REGION_DEMAND[r])[0])   # that region's systemic loss
+        worst.append(w)                                   # keep today's worst
+    return worst, exhausted

@@ -1,63 +1,66 @@
 """
-price_dynamics.py — price trajectory over time during a disruption
-CITS4403 — Raed
+price_dynamics.py - the oil price over time during a disruption
+CITS4403 - Raed
 
-Couples the two feedback loops so price becomes DYNAMIC rather than a static
-equilibrium:
-    shortage -> price up -> demand destroyed -> shortage eases   (negative)
-    shortage -> hoarding -> effective demand up -> worse shortage (positive)
-plus refinery shutdown/restart lags, which make the path matter.
+Each simulated day: run the network, measure the world shortfall, find the
+price that would clear the market, and move the actual price 12% of the way
+toward it (markets adjust gradually, not instantly).
 
-The question: does price spike and settle, overshoot, or oscillate?
+The demand response is inside clear_market(): as price rises, demand falls
+with each region's price elasticity. Hoarding (a second, positive feedback)
+can be switched on but is OFF by default.
 """
-import numpy as np
-from oil_model_data import *
-from oil_network_model import OilNetworkModel, REGION_DEMAND
+import numpy as np                                            # maths: clip, mean, argmax
+from oil_model_data import *                                  # constants (elasticities, reserve figures)
+from oil_network_model import OilNetworkModel, REGION_DEMAND  # the network model
 
 
 def simulate_price(blockade, days=240, hoarding=False, reserve_days=0,
                    demand_policy=0.0):
-    m = OilNetworkModel(hoarding=hoarding)
-    price = 1.0
-    destroyed = 0.0          # demand destroyed by high prices (closes the loop)
-    hist = dict(price=[], unserved=[], demand=[], hoard=[])
+    """Price path, day by day.
 
-    prev_price = 1.0
-    for d in range(days):
-        trend = price - prev_price          # recent price momentum
-        prev_price = price
-        unserved, _, _ = m.step(1.0 - blockade, price_trend=max(0.0, trend))
-        short = sum(unserved.values())
+    blockade       share of Hormuz CLOSED (0..1)
+    reserve_days   for this many days, take 2.7 mb/d off the shortfall
+                   (a simple single-reserve option; the regional version is in
+                   spr_depletion.py)
+    demand_policy  share of world demand cut by policy (e.g. 0.03 = 3%)
+    Returns a dict of daily lists: price, unserved, demand, hoard.
+    """
+    m = OilNetworkModel(hoarding=hoarding)          # fresh model for this scenario
+    price = 1.0                                     # price index: 1.0 = pre-crisis ($69)
+    destroyed = 0.0                                 # demand destroyed by high prices, mb/d
+    hist = dict(price=[], unserved=[], demand=[], hoard=[])   # what we record each day
 
-        # strategic reserve covers part of the gap for a limited window
-        if d < reserve_days:
+    prev_price = 1.0                                # yesterday's price (for the price trend)
+    for d in range(days):                           # one loop = one day
+        trend = price - prev_price                  # how fast price is rising (only used by hoarding)
+        prev_price = price                          # remember today's price for tomorrow
+        unserved, _, _ = m.step(1.0 - blockade, price_trend=max(0.0, trend))   # run the network (step takes the OPEN share)
+        short = sum(unserved.values())              # total world shortfall today
+
+        if d < reserve_days:                        # optional single reserve, for a limited window
             short = max(0.0, short - SPR_MAX_WITHDRAW)
-        # policy-driven demand restraint
-        short = max(0.0, short - sum(REGION_DEMAND.values()) * demand_policy)
-        # --- price adjusts toward the market-clearing level ---
-        # clear_market() contains the demand response (constant elasticity),
-        # so the physical shortfall is passed in directly. (An earlier version
-        # subtracted destroyed demand first AND used a linear formula, which
-        # counted demand destruction twice and understated price.)
-        base = sum(REGION_DEMAND.values())
-        target, _ = m.clear_market(base - short)
-        # price moves gradually (markets adjust, not instantly)
-        price += 0.12 * (target - price)
-        price = float(np.clip(price, 1.0, 40.0))
+        short = max(0.0, short - sum(REGION_DEMAND.values()) * demand_policy)   # optional demand restraint
 
-        # --- demand responds to price (negative feedback) ---
-        # constant-elasticity form: q = q0 * price^e  (e negative)
-        destroyed = sum(REGION_DEMAND[r] * (1.0 - price ** PRICE_ELASTICITY[r])
+        # The price that would make demand equal supply. clear_market() already
+        # includes the demand response, so the physical shortfall goes in directly.
+        # (An earlier version subtracted destroyed demand first, counting it twice.)
+        base = sum(REGION_DEMAND.values())          # normal world demand
+        target, _ = m.clear_market(base - short)    # supply available = demand - shortfall
+        price += 0.12 * (target - price)            # move 12% of the way toward it each day
+        price = float(np.clip(price, 1.0, 40.0))    # never below pre-crisis, never above 40x
+
+        destroyed = sum(REGION_DEMAND[r] * (1.0 - price ** PRICE_ELASTICITY[r])   # demand lost at this price
                         for r in REGION_DEMAND)
 
-        hist["price"].append(price)
+        hist["price"].append(price)                 # record the day
         hist["unserved"].append(short)
         hist["demand"].append(base - destroyed)
-        hist["hoard"].append(np.mean(list(m.order_mult.values())))
+        hist["hoard"].append(np.mean(list(m.order_mult.values())))   # average hoarding multiplier (1.0 when off)
     return hist
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":                          # only when run directly
     for b, lab in [(0.4, "40% blocked"), (0.7, "70% blocked"), (1.0, "full closure")]:
         h = simulate_price(b)
         p = h["price"]
@@ -68,6 +71,6 @@ if __name__ == "__main__":
     for lab, kw in [("none", {}),
                     ("reserve (60d)", dict(reserve_days=60)),
                     ("demand restraint 3%", dict(demand_policy=0.03)),
-                    ("no hoarding", dict(hoarding=False))]:
+                    ("no hoarding", dict(hoarding=False))]:   # (hoarding is off by default, so this equals "none")
         h = simulate_price(1.0, **kw)
         print(f"  {lab:<22} peak {max(h['price']):5.2f}x  final {h['price'][-1]:5.2f}x")

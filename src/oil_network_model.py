@@ -1,34 +1,47 @@
 """
-oil_network_model.py — NETWORK cascade model of chokepoint disruption
-CITS4403 — Raed
+oil_network_model.py - the physical model of the world oil network (Layers 1 and 2)
+CITS4403 - Raed
 
-This replaces the arithmetic version. It is a genuine complex-systems model:
+WHAT IT REPRESENTS
+  Nodes   10 consuming regions, 11 producing nodes (each region's export side,
+          plus East Siberia), and 8 maritime chokepoints.
+  Edges   37 routes. Each route goes producer -> (chokepoints) -> consumer, takes
+          a number of days, and may have its own limit (pipelines, terminals).
+  Limits  Only engineered things have a capacity: the Saudi and UAE bypass
+          pipelines, Russia's Baltic terminals, and the Suez and Panama canals.
+          Open sea straits have no limit, only a normal flow. Hormuz is the
+          passage we close: x% open lets through x% of its normal flow.
 
-  NETWORK      regions connected by maritime ROUTES, each route passing through
-               real chokepoints with finite capacity (EIA data).
-  CONGESTION   when a chokepoint closes, flows reroute onto alternatives until
-               THOSE saturate -> second-wave failures (cascade through the net).
-  DISCONTINUITY refineries cannot run below MIN_OPERATING_RATE; below it they
-               SHUT DOWN entirely. Supply loss -> step changes, not pro-rata.
-  CONTENTION   all regions bid for the same scarce non-Gulf supply; allocation
-               is competitive, so some buyers are squeezed out completely.
-  FEEDBACK     shortage -> precautionary hoarding -> effective demand RISES ->
-               worse shortage. Positive feedback, like a bank run.
-  HYSTERESIS   a shut refinery needs RESTART_DAYS to come back, so the system's
-               state depends on its history, not just current supply.
+WHAT ONE SIMULATED DAY DOES (step -> allocate_flows)
+  1. Domestic first   each region uses its own production before trading.
+  2. Split exports    each exporter's surplus is part contracted, part spot.
+  3. Stage 1          contracted oil fills the fastest routes first.
+  4. Stage 2          spot oil goes to short regions in one queue, ordered by
+                      netback (scarcity bid minus freight).
+  5. Score the day    shortfall = demand - oil delivered (after the refinery
+                      complexity uplift).
 
-None of these are predictable by subtraction; they interact.
+SWITCHED OFF BY DEFAULT (implemented, but found to be wrong or never active)
+  hoarding        counted stockpiled oil as consumption - starved other regions
+  redistribution  stranded domestic oil at shut refineries - impossible result
+  refinery shutdown / restart lag - present, but no region ever falls below the
+  55% minimum operating rate, so it never triggers.
 """
 
-import numpy as np
-import networkx as nx
-from oil_model_data import *
+import numpy as np                      # maths: clip, mean
+import networkx as nx                   # graph library from the lectures
+from oil_model_data import *            # every number the model uses (see that file)
 
 
 # ----------------------------------------------------------------------
-# Network definition: regions, routes, and which chokepoints each uses
+# THE ROUTES (the edges of the network)
+# Each entry:  name: (origin, destination, [chokepoints passed], days, route limit)
+#   origin       a producing node; "_P" marks a region's export side
+#   destination  a consuming region
+#   chokepoints  the passages the voyage goes through, in order
+#   days         voyage length - used to order routes and to use up tankers
+#   route limit  mb/d limit of the route itself, or None for no limit
 # ----------------------------------------------------------------------
-# route -> (origin, destination, [chokepoints used], transit days)
 ROUTES = {
     # name: (origin, destination, chokepoints, days, route_capacity or None)
     # Origins carry a "_P" suffix so producer and consumer nodes stay distinct.
@@ -45,13 +58,18 @@ ROUTES = {
     "ME->NAmerica":         ("MidEast_P", "NAmerica",   ["Hormuz", "Bab el-Mandeb", "Suez+SUMED"], 35, None),
     # ---- Middle East: bypassing Hormuz ----
     # Saudi East-West pipeline to Yanbu, then out via the Red Sea.
-    # All three legs share ONE 5.0 mb/d pipeline budget.
-    "SaudiPipe->Europe":    ("MidEast_P", "Europe",     ["Bab el-Mandeb", "Suez+SUMED"], 16, 5.0),
-    "SaudiPipe->India":     ("MidEast_P", "India",      ["Bab el-Mandeb"], 10, 5.0),
-    "SaudiPipe->China":     ("MidEast_P", "China",      ["Bab el-Mandeb", "Malacca"], 24, 5.0),
+    # The legs have no cap of their own: crude arriving at Yanbu can be loaded
+    # for any destination. They share ONE budget (SHARED_PIPELINES, 7.0 mb/d).
+    "SaudiPipe->Europe":    ("MidEast_P", "Europe",     ["Bab el-Mandeb", "Suez+SUMED"], 16, None),
+    "SaudiPipe->India":     ("MidEast_P", "India",      ["Bab el-Mandeb"], 10, None),
+    "SaudiPipe->China":     ("MidEast_P", "China",      ["Bab el-Mandeb", "Malacca"], 24, None),
+    "SaudiPipe->OtherAsia": ("MidEast_P", "OtherAsia",  ["Bab el-Mandeb", "Malacca"], 18, None),
+    "SaudiPipe->JapanKorea":("MidEast_P", "JapanKorea", ["Bab el-Mandeb", "Malacca"], 26, None),
     # UAE ADCOP to Fujairah - avoids Hormuz AND Bab el-Mandeb. Shared 1.5 budget.
-    "ADCOP->India":         ("MidEast_P", "India",      [], 6, 1.5),
-    "ADCOP->China":         ("MidEast_P", "China",      ["Malacca"], 21, 1.5),
+    "ADCOP->India":         ("MidEast_P", "India",      [], 6, None),
+    "ADCOP->China":         ("MidEast_P", "China",      ["Malacca"], 21, None),
+    "ADCOP->OtherAsia":     ("MidEast_P", "OtherAsia",  ["Malacca"], 14, None),
+    "ADCOP->JapanKorea":    ("MidEast_P", "JapanKorea", ["Malacca"], 22, None),
 
     # ---- CIS (Russia, Kazakhstan) ----
     "CIS->Europe (Baltic)": ("CIS_P", "Europe",     ["Danish Straits"], 5, 2.5),
@@ -84,279 +102,256 @@ ROUTES = {
     "LA->China":            ("LatAm_P", "China",    ["Cape of Good Hope", "Malacca"], 40, None),
 }
 
-# Pipelines whose legs share one throughput budget
+# Pipelines that feed several routes: all their legs share ONE daily budget.
+# e.g. every route starting "SaudiPipe..." draws from the same 7.0 mb/d.
 SHARED_PIPELINES = {"SaudiPipe": SAUDI_EASTWEST_CAPACITY, "ADCOP": 1.5}
 
-REGIONS = list(CONSUMPTION_BY_REGION)
-REGION_DEMAND = dict(CONSUMPTION_BY_REGION)
-ORIGIN_SUPPLY = {r + "_P": PRODUCTION_BY_REGION[r] for r in REGIONS}
-# East Siberian production is export-only to the Pacific (ESPO, ~1.8 mb/d)
-ORIGIN_SUPPLY["CIS_P"]     -= CIS_EAST_PRODUCTION
-ORIGIN_SUPPLY["CISEast_P"]  = CIS_EAST_PRODUCTION
+REGIONS = list(CONSUMPTION_BY_REGION)            # the 10 consuming regions
+REGION_DEMAND = dict(CONSUMPTION_BY_REGION)      # how much oil each region needs, mb/d
+ORIGIN_SUPPLY = {r + "_P": PRODUCTION_BY_REGION[r] for r in REGIONS}   # each region's production, as a producer node
+ORIGIN_SUPPLY["CIS_P"]     -= CIS_EAST_PRODUCTION   # take East Siberia out of Russia-west...
+ORIGIN_SUPPLY["CISEast_P"]  = CIS_EAST_PRODUCTION   # ...and make it its own node (can only reach the Pacific)
+
 
 class OilNetworkModel:
+    """One copy of the world oil system. Create one per scenario, then call
+    step() once per simulated day (or run() for many days)."""
+
     def __init__(self, hoarding=False, min_rate=MIN_OPERATING_RATE,
                  restart_days=RESTART_DAYS, tanker_fleet_days=None,
                  bid_steepness=4.0, redistribution=1.0, seed=0):
+        """Set every region to its normal, undisrupted state.
+
+        hoarding        False by default: when on, rising prices make regions
+                        order up to 2x their need (found to starve others).
+        redistribution  1.0 by default: share of a region's oil that can be moved
+                        between its refineries; below 1.0 some is stranded.
+        bid_steepness   how sharply a region's bid rises as it runs short.
         """
-        hoarding=False  (default OFF) - when on, regions over-order up to 2x as
-            prices rise. Disabled by default because hoarded orders compete for
-            supply as if they were real demand, starving other regions
-            (Japan/Korea fell to 79% unserved with it on, 2% with it off).
-            Kept as a switch for sensitivity analysis.
-        redistribution=1.0  (default OFF) - fraction of a region's oil that can
-            be moved between refineries. Below 1.0, oil is stranded at shut
-            plants. Disabled by default because it strands DOMESTIC production
-            too, which feeds domestic refineries directly - it pushed China
-            below its own production level. Kept as a switch.
-        """
-        self.rng = np.random.default_rng(seed)
-        self.hoarding = hoarding
-        self.bid_steepness = bid_steepness   # how hard scarcity drives bidding
-        # How freely crude can be moved BETWEEN refineries within a region.
-        # 1.0 = frictionless pooling (unrealistic: grades, pipelines and
-        # bilateral contracts are fixed). <1.0 means some supply is STRANDED
-        # at refineries that cannot reach minimum operating rate.
-        self.redistribution = redistribution
-        self.premium = {r: 1.0 for r in REGION_DEMAND}
-        self.min_rate = min_rate
-        self.restart_days = restart_days
+        self.rng = np.random.default_rng(seed)     # random generator (kept for future use; nothing is random now)
+        self.hoarding = hoarding                   # is the hoarding feedback switched on?
+        self.bid_steepness = bid_steepness         # the "4" in premium = 1 + 4 x (short/demand)^2
+        self.redistribution = redistribution       # 1.0 = oil moves freely between a region's refineries
+        self.premium = {r: 1.0 for r in REGION_DEMAND}   # every region starts bidding at 1.0 (not short)
+        self.min_rate = min_rate                   # a refinery shuts below this share of its capacity (0.55)
+        self.restart_days = restart_days           # days a shut refinery takes to restart
 
-        # build the graph (for structure + any network metrics we want)
-        self.G = nx.DiGraph()
-        for r, (o, d, cps, days, _rc) in ROUTES.items():
-            self.G.add_edge(o, d, route=r, chokepoints=cps, days=days)
+        self.G = nx.DiGraph()                      # a directed graph of the network, for reference
+        for r, (o, d, cps, days, _rc) in ROUTES.items():          # for every route...
+            self.G.add_edge(o, d, route=r, chokepoints=cps, days=days)   # ...add an edge producer -> consumer
 
-        # refinery state per region: fraction of capacity running
-        self.running = {r: 1.0 for r in REGION_DEMAND}
-        self.shut_timer = {r: 0 for r in REGION_DEMAND}   # days until restart
-        self.n_refineries = 12                            # plants per region
-        self.shut_count = {r: 0 for r in REGION_DEMAND}   # how many are down
-        # precautionary ordering multiplier (hoarding feedback)
-        self.order_mult = {r: 1.0 for r in REGION_DEMAND}
+        self.running = {r: 1.0 for r in REGION_DEMAND}     # share of each region's refining that is running (1 = all)
+        self.shut_timer = {r: 0 for r in REGION_DEMAND}    # days until shut refineries restart
+        self.n_refineries = 12                             # each region is treated as 12 equal refineries
+        self.shut_count = {r: 0 for r in REGION_DEMAND}    # how many of those 12 are shut
+        self.order_mult = {r: 1.0 for r in REGION_DEMAND}  # hoarding multiplier on demand (1.0 = order exactly what you need)
 
-        # total tanker capacity, in barrel-days (fleet constraint).
-        # Sized so the normal trade pattern just fits.
-        if tanker_fleet_days is None:
-            base = sum(ORIGIN_SUPPLY.values())
-            self.fleet = base * BASE_VOYAGE_DAYS * 1.25   # 25% slack
+        if tanker_fleet_days is None:                      # if no fleet size was given...
+            base = sum(ORIGIN_SUPPLY.values())             # ...take total world supply...
+            self.fleet = base * BASE_VOYAGE_DAYS * 1.25    # ...x a typical 20-day voyage x 25% slack = barrel-days of tankers
         else:
-            self.fleet = tanker_fleet_days
+            self.fleet = tanker_fleet_days                 # otherwise use the size given
 
-    # ---------------- routing with congestion + competition ----------------
+    # ------------------------------------------------------------------
+    # LAYER 1: where does the oil go today?
+    # ------------------------------------------------------------------
     def allocate_flows(self, hormuz_open_fraction, extra_closed=None):
-        """Allocate the world's oil across routes.
+        """Allocate one day of the world's oil across the routes.
 
-        Step 1 - DOMESTIC FIRST: each region consumes its own production
-                 before anything is traded. Domestic oil can never be bid away.
-        Step 2 - split each region's EXPORTABLE SURPLUS into a contracted share
-                 and a spot (contestable) share.
-        Step 3 - STAGE 1: contracted exports, fastest route first.
-        Step 4 - STAGE 2: spot exports go to the highest netback (scarcity
-                 premium minus freight cost) - desperation weighed against
-                 distance, as a trader would.
-
-        No pre-loading: every corridor starts empty and fills with real
-        routed traffic.
+        hormuz_open_fraction  1.0 = Hormuz open, 0.0 = fully closed
+        extra_closed          optional {passage: fraction open}, e.g. Bab el-Mandeb
+        Returns (delivered per region, flow per chokepoint, demand per region).
         """
-        cap = {c: CHOKEPOINTS[c][1] for c in CHOKEPOINTS}
-        cap["Hormuz"] *= hormuz_open_fraction
-        for c, frac in (extra_closed or {}).items():
-            cap[c] *= frac
+        # The limit on each passage today. Straits have no limit (1e9 = effectively infinite);
+        # canals keep their capacity.
+        cap = {c: (CHOKEPOINTS[c][1] if CHOKEPOINTS[c][1] is not None else 1e9)
+               for c in CHOKEPOINTS}
+        cap["Hormuz"] = CHOKEPOINTS["Hormuz"][0] * hormuz_open_fraction   # Hormuz: x% open lets through x% of normal flow
+        for c, frac in (extra_closed or {}).items():                        # any other passage being closed...
+            cap[c] = min(cap[c], CHOKEPOINTS[c][0] * frac)                  # ...same rule, measured against its normal flow
 
-        used = {c: 0.0 for c in CHOKEPOINTS}
-        delivered = {r: 0.0 for r in REGIONS}
-        fleet_used = 0.0
-        supply_left = dict(ORIGIN_SUPPLY)
-        want = {r: REGION_DEMAND[r] * self.order_mult[r] for r in REGIONS}
-        pipe_left = dict(SHARED_PIPELINES)
+        used = {c: 0.0 for c in CHOKEPOINTS}          # oil sent through each passage so far today
+        delivered = {r: 0.0 for r in REGIONS}         # oil each region has received so far today
+        fleet_used = 0.0                              # tanker capacity used so far today (barrel-days)
+        supply_left = dict(ORIGIN_SUPPLY)             # oil each producer still has to sell
+        want = {r: REGION_DEMAND[r] * self.order_mult[r] for r in REGIONS}   # what each region asks for (= demand unless hoarding)
+        pipe_left = dict(SHARED_PIPELINES)            # each shared pipeline's budget, full again at the start of the day
+        route_flow = {k: 0.0 for k in ROUTES}         # oil sent down each route today (for the tables and map)
 
         def push(rname, amount):
-            """Send `amount` down a route, limited by every constraint."""
-            nonlocal fleet_used
-            origin, dest, cps, days, route_cap = ROUTES[rname]
-            headroom = min([cap[c] - used[c] for c in cps], default=1e9)
-            fleet_headroom = (self.fleet - fleet_used) / max(days, 1)
-            rc = route_cap if route_cap is not None else 1e9
-            pipe = next((p for p in pipe_left if rname.startswith(p)), None)
+            """Send up to `amount` down one route; return how much actually went."""
+            nonlocal fleet_used                                       # this changes the outer day's tanker total
+            origin, dest, cps, days, route_cap = ROUTES[rname]        # unpack the route's definition
+            headroom = min([cap[c] - used[c] for c in cps], default=1e9)   # room left in the tightest passage on the path
+            fleet_headroom = (self.fleet - fleet_used) / max(days, 1) # tankers left, divided by voyage length
+            rc = (route_cap - route_flow[rname]) if route_cap is not None else 1e9   # room left on the route itself (counts both stages)
+            pipe = next((p for p in pipe_left if rname.startswith(p)), None)        # does this route draw on a shared pipeline?
             if pipe:
-                rc = min(rc, pipe_left[pipe])
-            flow = max(0.0, min(amount, supply_left.get(origin, 0.0),
-                                headroom, fleet_headroom, rc))
+                rc = min(rc, pipe_left[pipe])                         # if so, it can't exceed what's left in that pipeline
+            flow = max(0.0, min(amount, supply_left.get(origin, 0.0),  # send the SMALLEST of: what's asked for,
+                                headroom, fleet_headroom, rc))         # producer's oil, passage room, tankers, route/pipe room
             if flow <= 0:
-                return 0.0
+                return 0.0                                            # nothing could move: stop here
             for c in cps:
-                used[c] += flow
-            supply_left[origin] -= flow
-            delivered[dest] += flow
-            fleet_used += flow * days
+                used[c] += flow                                       # record the oil in every passage on the path
+            supply_left[origin] -= flow                               # the producer has that much less to sell
+            delivered[dest] += flow                                   # the buyer has received it
+            fleet_used += flow * days                                 # longer voyages tie up more tankers
             if pipe:
-                pipe_left[pipe] -= flow
-            return flow
+                pipe_left[pipe] -= flow                               # and it comes out of the pipeline's shared budget
+            route_flow[rname] += flow                                 # remember what this route carried
+            return flow                                               # tell the caller how much went
 
-        # ---- Step 1: domestic first ----
+        # ---- Step 1: DOMESTIC FIRST - a region always uses its own oil before trading ----
         for r in REGIONS:
-            take = min(supply_left[r + "_P"], want[r])
-            delivered[r] += take
-            supply_left[r + "_P"] -= take
+            take = min(supply_left[r + "_P"], want[r])     # use own production, up to own demand
+            delivered[r] += take                           # it counts as delivered
+            supply_left[r + "_P"] -= take                  # whatever is left over is available to export
 
-        # ---- Step 2: split exportable surplus ----
-        spot = {o: supply_left[o] * CONTESTABLE_FRACTION.get(o[:-2], 0.0)
+        # ---- Step 2: SPLIT each exporter's surplus into spot and contracted oil ----
+        spot = {o: supply_left[o] * CONTESTABLE_FRACTION.get(o[:-2], 0.0)   # the spot share (e.g. 35% for the Middle East)
                 for o in supply_left}
         for o in supply_left:
-            supply_left[o] -= spot[o]
+            supply_left[o] -= spot[o]                      # hold the spot oil back; only contracted oil is left for Stage 1
 
-        # ---- Step 3 (Stage 1): contracted exports, fastest first ----
-        for rname in sorted(ROUTES, key=lambda k: ROUTES[k][3]):
-            dest = ROUTES[rname][1]
-            need = want[dest] - delivered[dest]
+        # ---- Step 3: STAGE 1 - contracted oil, fastest route first ----
+        for rname in sorted(ROUTES, key=lambda k: ROUTES[k][3]):   # go through routes from shortest voyage to longest
+            dest = ROUTES[rname][1]                                # who the route delivers to
+            need = want[dest] - delivered[dest]                    # how much that region still needs
             if need > 0:
-                push(rname, need)
+                push(rname, need)                                  # send as much of it as this route can
 
-        # ---- Step 4 (Stage 2): spot exports by netback ----
+        # ---- Step 4: STAGE 2 - spot oil, to the highest bidder ----
         for o in supply_left:
-            supply_left[o] += spot[o]
-        shortfall = {r: max(0.0, want[r] - delivered[r]) for r in REGIONS}
-        self.premium = {}
+            supply_left[o] += spot[o]                              # release the held-back spot oil
+        shortfall = {r: max(0.0, want[r] - delivered[r]) for r in REGIONS}   # who is still short after Stage 1
+        self.premium = {}                                          # recompute today's bids
         for r in REGIONS:
-            frac_short = shortfall[r] / REGION_DEMAND[r] if REGION_DEMAND[r] else 0
-            self.premium[r] = 1.0 + self.bid_steepness * frac_short ** 2
+            frac_short = shortfall[r] / REGION_DEMAND[r] if REGION_DEMAND[r] else 0   # share of demand still missing
+            self.premium[r] = 1.0 + self.bid_steepness * frac_short ** 2         # bid rises with the square of the shortfall
 
-        FREIGHT = 0.01            # premium-units per transit day
-        for r in sorted(REGIONS, key=lambda x: -self.premium[x]):
-            if shortfall[r] <= 0:
-                continue
-            cand = [k for k in ROUTES if ROUTES[k][1] == r]
-            cand.sort(key=lambda k: -(self.premium[r] - FREIGHT * ROUTES[k][3]))
-            for rname in cand:
-                if shortfall[r] <= 0:
-                    break
-                shortfall[r] -= push(rname, shortfall[r])
+        FREIGHT = 0.01                                             # bid lost per voyage day (freight cost)
+        bids = [(self.premium[ROUTES[k][1]] - FREIGHT * ROUTES[k][3], k)   # NETBACK for every (short region, route to it) pair
+                for k in ROUTES if shortfall[ROUTES[k][1]] > 0]
+        self.last_bids = sorted(bids, reverse=True)                # ONE queue, highest netback first (kept for inspection)
+        self.last_stage1_shortfall = dict(shortfall)               # remember Stage-1 shortfalls (for inspection)
+        for netback, rname in self.last_bids:                      # walk down the queue
+            r = ROUTES[rname][1]                                   # the buyer on this route
+            if shortfall[r] > 0:                                   # only if that buyer still needs oil...
+                shortfall[r] -= push(rname, shortfall[r])          # ...send at most what it still needs, and reduce its need
 
-        return delivered, used, want
+        self.last_route_flow = route_flow                          # keep today's route flows (read by network_view.py)
+        return delivered, used, want                               # oil received, passage flows, demand
 
-    # ---------------- market clearing (price finds equilibrium) ----------------
+    # ------------------------------------------------------------------
+    # LAYER 2: what price balances supply and demand?
+    # ------------------------------------------------------------------
     def clear_market(self, available):
-        """Find the global price at which demand equals available supply.
+        """Find the single world price at which total demand equals `available`.
 
-        Oil is globally arbitraged, so there is ONE price. Price rises until
-        enough demand is destroyed to match supply. Because short-run demand
-        is very inelastic (-0.05 to -0.18), a small shortfall requires a LARGE
-        price rise - which is why oil shocks produce price spikes.
-
-        Regions with higher elasticity (more price-sensitive) bear more of the
-        demand destruction: the burden falls on whoever can least afford to pay.
+        Demand falls as price rises: demand_r = D_r x price^e_r, where e_r is the
+        region's (negative) price elasticity. Short-run demand is very
+        inelastic, so a small shortage needs a big price rise.
+        Returns (price index, demand per region); 1.0 = pre-crisis price.
         """
-        # Constant-elasticity demand, the standard form, matching
-        # price_dynamics.py and spr_depletion.py:   demand_r = D_r * price^e_r
-        # Solve sum_r D_r * price^e_r = available for price, by bisection.
-        def total_demand(p):
+        def total_demand(p):                                       # world demand at price index p
             return sum(REGION_DEMAND[r] * p ** PRICE_ELASTICITY[r]
                        for r in REGION_DEMAND)
-        if total_demand(1.0) <= available:
-            price = 1.0
+        if total_demand(1.0) <= available:                         # enough oil at the normal price?
+            price = 1.0                                            # then the price doesn't move
         else:
-            lo, hi = 1.0, 2.0
-            while total_demand(hi) > available and hi < 1e4:
+            lo, hi = 1.0, 2.0                                      # search between these two prices
+            while total_demand(hi) > available and hi < 1e4:       # double the upper guess until demand falls below supply
                 hi *= 2
-            for _ in range(80):
-                mid = 0.5 * (lo + hi)
-                if total_demand(mid) > available:
-                    lo = mid
+            for _ in range(80):                                    # bisection: halve the gap 80 times
+                mid = 0.5 * (lo + hi)                              # try the middle price
+                if total_demand(mid) > available:                  # still too much demand?
+                    lo = mid                                       # then the answer is higher
                 else:
-                    hi = mid
-            price = hi
-        demand = {r: REGION_DEMAND[r] * price ** PRICE_ELASTICITY[r]
+                    hi = mid                                       # otherwise it's lower
+            price = hi                                             # converged price index
+        demand = {r: REGION_DEMAND[r] * price ** PRICE_ELASTICITY[r]   # each region's demand at that price
                   for r in REGION_DEMAND}
         return price, demand
 
-    # ---------------- one timestep ----------------
+    # ------------------------------------------------------------------
+    # ONE SIMULATED DAY
+    # ------------------------------------------------------------------
     def step(self, hormuz_open_fraction, price_trend=0.0, extra_closed=None):
-        delivered, used, want = self.allocate_flows(hormuz_open_fraction, extra_closed)
+        """Run one day: allocate oil, then work out each region's shortfall.
+        Returns (shortfall per region, flow per chokepoint, delivered per region)."""
+        delivered, used, want = self.allocate_flows(hormuz_open_fraction, extra_closed)   # Layer 1: route the oil
 
-        unserved = {}
+        unserved = {}                                      # each region's shortfall today
         for r in REGION_DEMAND:
-            base_need = REGION_DEMAND[r]
-            got = delivered[r]
+            base_need = REGION_DEMAND[r]                   # what the region needs (ignoring any hoarding)
+            got = delivered[r]                             # crude it actually received
 
-            # --- grade substitution ability (regional refinery complexity) ---
+            # Refinery-complexity uplift (a PROXY): complex refineries get up to 15% more
+            # usable product per barrel. width = 0 for the simplest, 1 for the most complex.
             width = np.clip((REGION_NCI[r] - NCI_MIN) / (NCI_MAX - NCI_MIN), 0.02, 1)
-            effective = got * (1.0 + 0.15 * width)   # complex refiners extract more
+            effective = got * (1.0 + 0.15 * width)         # crude received, scaled up by the uplift
 
-            # --- DISCONTINUITY: each region has N refineries, each with a
-            # minimum operating rate. Operators CONCENTRATE scarce crude into
-            # some plants and SHUT others, rather than running all at low rate.
-            n_ref = self.n_refineries
-            cap_each = base_need / n_ref
-            supply = effective
+            # Refinery shutdown: the region is 12 refineries, each needing at least
+            # 55% of its capacity to run. (In practice no region falls this low.)
+            n_ref = self.n_refineries                      # 12
+            cap_each = base_need / n_ref                   # one refinery's capacity
+            supply = effective                             # oil available to the refineries
 
-            # refineries already down stay down until their restart timer ends
-            down = self.shut_count[r]
+            down = self.shut_count[r]                      # refineries already shut
             if down > 0:
-                self.shut_timer[r] -= 1
-                if self.shut_timer[r] <= 0:          # HYSTERESIS ends
-                    self.shut_count[r] = 0
+                self.shut_timer[r] -= 1                    # one day closer to restarting
+                if self.shut_timer[r] <= 0:                # restart lag over?
+                    self.shut_count[r] = 0                 # bring them all back
                     self.shut_timer[r] = 0
 
-            available = n_ref - self.shut_count[r]
-            # how many refineries can be run at >= min_rate on this supply?
-            can_run = int(supply // (cap_each * self.min_rate))
-            can_run = min(can_run, available)
+            available = n_ref - self.shut_count[r]         # refineries able to run today
+            can_run = int(supply // (cap_each * self.min_rate))   # how many could run at least at minimum rate
+            can_run = min(can_run, available)              # can't run more than are available
 
-            newly_shut = available - can_run
+            newly_shut = available - can_run               # the rest must shut
             if newly_shut > 0:
-                self.shut_count[r] = min(n_ref, self.shut_count[r] + newly_shut)
-                self.shut_timer[r] = self.restart_days
+                self.shut_count[r] = min(n_ref, self.shut_count[r] + newly_shut)   # record them as shut
+                self.shut_timer[r] = self.restart_days     # and start the restart clock
 
-            # --- REDISTRIBUTION FRICTION ---
-            # Only a fraction of regional supply can be pooled and steered to
-            # the refineries that can still run; the rest is stranded at plants
-            # that fall below minimum operating rate.
-            if supply < n_ref * cap_each * self.min_rate:
-                poolable = supply * self.redistribution
+            if supply < n_ref * cap_each * self.min_rate:  # not enough to run every refinery at minimum?
+                poolable = supply * self.redistribution    # oil that can be moved to the running plants (all of it, by default)
                 can_run = min(available, int(poolable // (cap_each * self.min_rate)))
-                served = min(poolable, can_run * cap_each)   # stranded share lost
+                served = min(poolable, can_run * cap_each) # demand those running refineries can meet
             else:
-                served = min(supply, can_run * cap_each)
-            self.running[r] = served / base_need if base_need else 1.0
-            unserved[r] = max(0.0, base_need - served)
+                served = min(supply, can_run * cap_each)   # normal case: meet demand up to refinery capacity
+            self.running[r] = served / base_need if base_need else 1.0   # share of the region's demand being met
+            unserved[r] = max(0.0, base_need - served)     # THE SHORTFALL: demand that goes unmet
 
-            # --- FEEDBACK: precautionary hoarding ---
-            # Driven by EXPECTED PRICE, not by a region's own shortfall.
-            # A region that is fully supplied today still buys ahead when it
-            # sees prices climbing - this is why hoarding is contagious in a
-            # way physical shortage is not.
-            if self.hoarding:
-                own_short = unserved[r] / base_need if base_need else 0
-                # price_trend = recent rate of price increase (global signal)
-                expectation = HOARDING_SENSITIVITY * (price_trend * 8.0 + own_short)
-                target = 1.0 + expectation
-                self.order_mult[r] += 0.15 * (target - self.order_mult[r])
-                self.order_mult[r] = float(np.clip(self.order_mult[r], 1.0, 2.0))
+            if self.hoarding:                              # hoarding feedback (off by default)
+                own_short = unserved[r] / base_need if base_need else 0          # how short this region is
+                expectation = HOARDING_SENSITIVITY * (price_trend * 8.0 + own_short)   # rising prices + own shortage
+                target = 1.0 + expectation                                       # how much to over-order
+                self.order_mult[r] += 0.15 * (target - self.order_mult[r])       # move 15% of the way towards it
+                self.order_mult[r] = float(np.clip(self.order_mult[r], 1.0, 2.0))   # never below 1x or above 2x
 
         return unserved, used, delivered
 
     def run(self, hormuz_open_fraction, days=180):
-        hist = {"unserved": [], "chokepoints": [], "running": []}
-        for _ in range(days):
+        """Call step() for many days and keep a history of each day."""
+        hist = {"unserved": [], "chokepoints": [], "running": []}   # one list per thing we record
+        for _ in range(days):                                       # one loop = one simulated day
             unserved, used, delivered = self.step(hormuz_open_fraction)
-            hist["unserved"].append(sum(unserved.values()))
-            hist["chokepoints"].append(dict(used))
-            hist["running"].append(dict(self.running))
+            hist["unserved"].append(sum(unserved.values()))         # total world shortfall that day
+            hist["chokepoints"].append(dict(used))                  # flow through each passage that day
+            hist["running"].append(dict(self.running))              # share of demand met in each region
         return hist
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":                                  # only runs when this file is run directly
     print("Regions:", list(REGION_DEMAND), "demand mb/d:",
           {k: round(v, 1) for k, v in REGION_DEMAND.items()})
     print("Origins:", {k: round(v, 1) for k, v in ORIGIN_SUPPLY.items()})
     print("Routes:", len(ROUTES), "| Chokepoints:", len(CHOKEPOINTS))
-
-    # quick check: normal operation vs full closure
-    for frac, label in [(1.0, "strait OPEN"), (0.0, "strait CLOSED")]:
-        m = OilNetworkModel()
-        h = m.run(frac, days=120)
+    for frac, label in [(1.0, "strait OPEN"), (0.0, "strait CLOSED")]:   # quick check: open vs closed
+        m = OilNetworkModel()                                # fresh model
+        h = m.run(frac, days=120)                            # run 120 days
         print(f"\n{label}: mean unserved {np.mean(h['unserved']):.2f} mb/d, "
               f"final {h['unserved'][-1]:.2f}")
-        final_cp = h["chokepoints"][-1]
+        final_cp = h["chokepoints"][-1]                      # passage flows on the last day
         print("  chokepoint use:", {k: round(v, 1) for k, v in final_cp.items() if v > 0.1})
