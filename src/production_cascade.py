@@ -189,6 +189,30 @@ def compare_interventions():
     return rows
 
 
+def explain_cascade(oil_available_fraction):
+    """Every step of the sector cascade for one region, for display and teaching.
+
+    Runs run_production_cascade() to get the settled outputs, then recomputes
+    each intermediate quantity with the SAME formulas, so you can see why each
+    sector ends where it does.
+    Returns ({sector: {direct, upstream, effective, gate, output, weight, loss}},
+             systemic loss).
+    """
+    systemic, out = run_production_cascade(oil_available_fraction)   # settled outputs
+    rows = {}
+    for s in SECTORS:
+        direct = 1.0 - OIL_DEPENDENCE[s] * (1.0 - oil_available_fraction)   # left after its OWN oil shortage
+        upstream = 1.0                                                       # left after its SUPPLIERS' failures...
+        for supplier, intensity in DEPENDS_ON[s].items():
+            upstream -= intensity * (1.0 - out[supplier])                    # ...each supplier's loss x how much it's needed
+        upstream = max(0.0, upstream)
+        effective = min(direct, upstream)                                    # the worse of the two
+        gate = 1.0 / (1.0 + np.exp(-(effective - OPERABLE_MIN) / BAND_SMOOTHNESS))   # the shutdown switch
+        rows[s] = dict(direct=direct, upstream=upstream, effective=effective, gate=gate,
+                       output=out[s], weight=SECTORS[s], loss=SECTORS[s] * (1.0 - out[s]))
+    return rows, systemic
+
+
 if __name__ == "__main__":                                # only when run directly
     print("Sector oil shares:", SECTORS)
     print(f"Operability band: sectors fail below {OPERABLE_MIN:.0%} of input\n")

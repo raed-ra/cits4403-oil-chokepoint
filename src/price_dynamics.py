@@ -60,6 +60,26 @@ def simulate_price(blockade, days=240, hoarding=False, reserve_days=0,
     return hist
 
 
+def shortage_two_views(blockade, days=150):
+    """The same shortage seen two ways, at one closure level (share CLOSED).
+
+    physical  oil each region could not obtain - from the routing (Layer 1)
+    priced    how much each region would cut at the market-clearing price (Layer 2)
+
+    The totals are equal by construction: the price is chosen so that the cuts
+    add up to the shortfall. The split between regions is NOT the same, because
+    the cuts are never fed back into the routing (a limitation of the model).
+    Returns (price index, {region: (demand, physical shortfall, price-driven cut)}).
+    """
+    m = OilNetworkModel()                                   # fresh model
+    for _ in range(days):
+        unserved, _, _ = m.step(1.0 - blockade)             # settle the routing (step takes the OPEN share)
+    short = sum(unserved.values())                          # total physical shortfall
+    price, demand = m.clear_market(sum(REGION_DEMAND.values()) - short)   # price that removes that much demand
+    return price, {r: (REGION_DEMAND[r], unserved[r], REGION_DEMAND[r] - demand[r])
+                   for r in REGION_DEMAND}
+
+
 if __name__ == "__main__":                          # only when run directly
     for b, lab in [(0.4, "40% blocked"), (0.7, "70% blocked"), (1.0, "full closure")]:
         h = simulate_price(b)

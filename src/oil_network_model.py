@@ -24,8 +24,9 @@ WHAT ONE SIMULATED DAY DOES (step -> allocate_flows)
 SWITCHED OFF BY DEFAULT (implemented, but found to be wrong or never active)
   hoarding        counted stockpiled oil as consumption - starved other regions
   redistribution  stranded domestic oil at shut refineries - impossible result
-  refinery shutdown / restart lag - present, but no region ever falls below the
-  55% minimum operating rate, so it never triggers.
+  refinery shutdown / restart lag - triggers only at deep closures (e.g. Other
+  Asia at full closure), and never changes the result: the refineries still
+  running process all the oil that arrives (redistribution = 1.0).
 """
 
 import numpy as np                      # maths: clip, mean
@@ -145,6 +146,7 @@ class OilNetworkModel:
         self.n_refineries = 12                             # each region is treated as 12 equal refineries
         self.shut_count = {r: 0 for r in REGION_DEMAND}    # how many of those 12 are shut
         self.order_mult = {r: 1.0 for r in REGION_DEMAND}  # hoarding multiplier on demand (1.0 = order exactly what you need)
+        self.push_log = None                               # set to [] to record every push (for tracing only)
 
         if tanker_fleet_days is None:                      # if no fleet size was given...
             base = sum(ORIGIN_SUPPLY.values())             # ...take total world supply...
@@ -190,6 +192,11 @@ class OilNetworkModel:
                 rc = min(rc, pipe_left[pipe])                         # if so, it can't exceed what's left in that pipeline
             flow = max(0.0, min(amount, supply_left.get(origin, 0.0),  # send the SMALLEST of: what's asked for,
                                 headroom, fleet_headroom, rc))         # producer's oil, passage room, tankers, route/pipe room
+            if self.push_log is not None:                             # tracing only: record the five limits
+                self.push_log.append(dict(route=rname, origin=origin, dest=dest, cps=list(cps), days=days,
+                                          need=amount, producer_left=supply_left.get(origin, 0.0),
+                                          passage_room=headroom, tanker_room=fleet_headroom,
+                                          route_room=rc, pipe=pipe, sent=flow))
             if flow <= 0:
                 return 0.0                                            # nothing could move: stop here
             for c in cps:
@@ -213,6 +220,8 @@ class OilNetworkModel:
                 for o in supply_left}
         for o in supply_left:
             supply_left[o] -= spot[o]                      # hold the spot oil back; only contracted oil is left for Stage 1
+        self.last_spot = dict(spot)                        # remember the spot oil (for the trace)
+        self.last_contracted = dict(supply_left)           # remember the contracted oil (for the trace)
 
         # ---- Step 3: STAGE 1 - contracted oil, fastest route first ----
         for rname in sorted(ROUTES, key=lambda k: ROUTES[k][3]):   # go through routes from shortest voyage to longest
@@ -220,6 +229,11 @@ class OilNetworkModel:
             need = want[dest] - delivered[dest]                    # how much that region still needs
             if need > 0:
                 push(rname, need)                                  # send as much of it as this route can
+
+        self.last_stage1_flow = dict(route_flow)                   # route flows after Stage 1 (for the trace)
+
+        if self.push_log is not None:
+            self.push_log.append("STAGE 2")                          # tracing only: mark where Stage 2 starts
 
         # ---- Step 4: STAGE 2 - spot oil, to the highest bidder ----
         for o in supply_left:
@@ -293,7 +307,7 @@ class OilNetworkModel:
             effective = got * (1.0 + 0.15 * width)         # crude received, scaled up by the uplift
 
             # Refinery shutdown: the region is 12 refineries, each needing at least
-            # 55% of its capacity to run. (In practice no region falls this low.)
+            # 55% of its capacity to run. (Only at deep closures; the rest then run harder.)
             n_ref = self.n_refineries                      # 12
             cap_each = base_need / n_ref                   # one refinery's capacity
             supply = effective                             # oil available to the refineries

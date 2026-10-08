@@ -3,85 +3,125 @@
 **CITS4403 Computational Modelling — Research Project**
 Author: Raed (solo project, coordinator approved)
 
-A network cascade model of the 2026 Strait of Hormuz closure, calibrated to
-published data, used to locate the critical closure threshold and compare the
-three real policy interventions.
+A network cascade model of the 2026 Strait of Hormuz closure. Ten world regions
+trade oil over 37 routes through eight maritime chokepoints; a closure's shortfall
+is passed into a five-sector production model to find the point at which a local
+oil shortage becomes systemic production failure, and to compare real
+interventions.
 
 ## Research question
 
-> As the fraction of Hormuz flow blocked increases, is there a **critical
-> closure level** at which localised shortfall becomes systemic production
-> failure — and which intervention (strategic reserve release, demand
-> reduction, bypass capacity) most raises that threshold?
+> As the fraction of Hormuz flow blocked increases, is there a **critical closure
+> level** at which localised shortfall becomes systemic production failure — and
+> which intervention (strategic reserve release, demand restraint, bypass capacity)
+> most raises that threshold?
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
+python src/test_model.py                      # 25 correctness checks - all should pass
 jupyter notebook notebooks/main_analysis.ipynb
 ```
 
-Then **Run All**. Total runtime approximately 3–5 minutes. Figures are written
-to `figures/`.
+Then **Restart and Run All**. The full run takes about **10–15 minutes** (the
+11 × 11 closure grid and the intervention comparison are the slow parts).
+Figures are written to `figures/`.
 
 ## Repository structure
 
 ```
-├── src/                      model code
-│   ├── oil_model_data.py       all real-world constants + sources
-│   ├── oil_network_model.py    routing, congestion, competitive allocation
-│   ├── production_cascade.py   downstream sector cascade
-│   ├── price_dynamics.py       price equilibrium + hoarding feedback
-│   ├── spr_depletion.py        strategic reserve runway
-│   ├── sensitivity.py          parameter sweeps
-│   └── topology_comparison.py  network analysis vs ER/WS/BA null models
-├── utils/paths.py            import helper for notebooks
-├── data/DATA_AND_SOURCES.md  every figure used, with its source
+├── src/
+│   ├── oil_model_data.py        every number the model uses, marked [DATA] or [ASSUMPTION]
+│   ├── oil_network_model.py     Layers 1-2: routes, daily allocation, market price
+│   ├── production_cascade.py    Layer 3: sector cascade; threshold; interventions
+│   ├── price_dynamics.py        price path over time
+│   ├── spr_depletion.py         regional strategic reserves
+│   ├── network_view.py          node and edge tables, network maps
+│   ├── closure_sensitivity.py   Hormuz x Bab el-Mandeb closure grid
+│   ├── sensitivity.py           parameter sweeps, path dependence
+│   ├── topology_comparison.py   network metrics vs ER / WS / BA null models
+│   ├── layer_diagrams.py        Layers 2 and 3 drawn as networks
+│   ├── experiment_feedback.py   experimental extension: price feedback
+│   ├── debug_trace.py           debugger-style trace of the real program -> PROGRAM_TRACE.md
+│   ├── trace_model.py           step-by-step printout of one scenario (python trace_model.py 0.7)
+│   └── test_model.py            25 correctness and boundary-case checks
+├── utils/paths.py               lets the notebook find src/ and figures/
+├── data/DATA_AND_SOURCES.md     every figure used, with its source
 ├── notebooks/main_analysis.ipynb   the full analysis (run this)
-├── figures/                  generated output
+├── figures/                     generated output
 └── requirements.txt
 ```
 
-Each module also runs standalone: `python src/spr_depletion.py`.
-
-## Changing parameters
-
-All real-world constants live in `src/oil_model_data.py`. Edit there and re-run
-the notebook — no notebook changes needed.
-
-## Data
-
-Calibrated to EIA, IEA, DOE, S&P Global Platts, Oil & Gas Journal, and
-published elasticity estimates (Cooper 2003; Ghouri 2001; EIA working papers).
-Full list with links in `data/DATA_AND_SOURCES.md`.
-
-Validation: the model reproduces observed EIA Q2 2026 chokepoint flows
-(Hormuz 5.0 vs 4.9 observed; Malacca 16.7 vs 16.6 observed) and the observed
-Brent price move.
+Each module also runs on its own, e.g. `python src/network_view.py`.
+All constants live in `src/oil_model_data.py`: change one there and re-run.
 
 ## Main findings
 
-1. Critical blockade intensity ~54% (An et al. 2026 report 32–46%).
-2. Correlated chokepoint failure (Hormuz + Bab el-Mandeb) roughly triples damage.
-3. Price-mediated contagion: North America loses supply despite ~2.5% Hormuz
-   exposure, because Asia outbids it for Atlantic crude.
-4. Strategic reserve runway is rate-limited at ~105 days regardless of severity.
-5. Demand destruction falls on the most price-elastic regions.
-6. Topology alone does not explain vulnerability — capacity concentration does.
-7. Oscillating disruption does ~40% more damage than a smooth ramp of equal
-   total exposure.
+1. **Critical closure ≈ 53%.** The worst-hit region first loses 10% of its output
+   when 53% of Hormuz is blocked. Robust to the sector-shutdown assumption
+   (52.6–53.1%); 51% without the refinery-complexity proxy. An et al. (2026) report
+   32–46% using a different definition of failure. The value moved between 38% and
+   56% across structural revisions of the model, so treat it as this model's
+   estimate rather than a property of the world.
+2. **Which intervention raises the threshold most.** Per barrel (~3 mb/d each):
+   bypass capacity +14 points, demand restraint +7, reserves +5. At realistic
+   sizes: reserves +19, but only until regional stocks run out (at 71% closure,
+   China's on day 350); bypass +10 and restraint +7 are permanent. All three: +38.
+3. **Damage is confined to Asia.** At full closure Other Asia loses 67% of its
+   demand and China 37%; Europe, India and North America remain fully supplied.
+4. **Correlated failure.** Closing Bab el-Mandeb as well as 70% of Hormuz raises
+   unserved demand by 49% (6.6 → 9.9 mb/d): the main Hormuz bypass, the Saudi
+   East-West pipeline, exits through the Red Sea.
+5. **Reserves are in the wrong place.** At full closure, day 100: Brent ~$236 with
+   no reserves, ~$151 with realistic regional reserves, ~$81 if all could be pooled.
+   About 500 Mb (US, Europe, India) is never drawn.
+6. **The real network is more robust than random graphs** of the same size:
+   removing its most central chokepoint costs 5.6% of capacity against 12–27%.
+7. **Volatility matters.** On-off disruption does ~31% more damage than a smooth
+   ramp with the same total exposure; the order of events alone makes no difference.
 
-## Honest limitations
+## Extension (experimental): price feedback
 
-Routes are constructed from geography rather than bilateral trade data; the
-operability band and price adjustment speed are our calibration choices;
-regional refinery complexity values are estimated; refinery shutdown hysteresis
-is implemented but never activates in the scenarios tested. See section 10 of
-the notebook.
+`src/experiment_feedback.py` (notebook section 9c) fixes the main limitation: demand cut by
+high prices is returned to the market, and price-driven cuts count as lost oil. The
+threshold rises from 53% to 64% and the worst region's loss at full closure falls from 89%
+to 23% - the shortage is shared by every region instead of being concentrated in Asia.
+This takes about a month to happen: in the first weeks the shortage is still concentrated in
+Asia, so 53% describes the start of a closure and 64% the situation once markets adjust.
+Robust to the cut cap (20-30%).
+
+## Validation
+
+- **Not a test:** Hormuz flow (4.9 mb/d) is set from the observed Q2 2026 value.
+- **Corridors the model works out itself**, Q2 2026: Bab el-Mandeb 7.0 vs 8.1
+  observed, Suez 3.6 vs 5.8, Malacca 9.9 vs 16.6. The direction of rerouting is
+  right; the size is under-predicted, mainly because refined products are not
+  modelled.
+- **Price:** at the Q2 2026 closure the model gives $94 with full reserves and
+  $143 with none; the observed ~$105 lies inside that bracket.
+- **Retracted finding:** an earlier claim that North America was hurt by
+  "contagion" was an artefact of mixing crude-only production with total-liquids
+  consumption. North America is a net exporter.
+
+## Limitations
+
+Routes are built from geography, not bilateral trade data. Allocation is a single
+greedy pass, not a market equilibrium, and there is no price feedback into routing:
+demand cut by high prices is never offered to other buyers, so damage is concentrated in
+Asia more than it would be in reality. All liquids are treated as interchangeable
+(no refined products, no crude grades). Regional production uses 2025 data and
+consumption 2024 data, and several regional consumption totals are estimates (how each
+figure was obtained is set out in `data/DATA_AND_SOURCES.md`). Several parameters are assumptions (see
+`data/DATA_AND_SOURCES.md`). Hoarding and redistribution friction are implemented
+but switched off; refinery shutdown triggers only at deep closures, and never changes the result. Full list in
+section 10 of the notebook.
 
 ## Literature
 
-- An et al. (2026), *A Network-Cascade Framework for Short-Run Production
-  Failure Under Maritime-Energy Chokepoint Disruption*, Mathematics 14(10):1708.
-- Sharma & Lau (2026), *Securing the Flow*, arXiv:2605.11990.
+- An, F., Ren, S., Liu, X., Liu, S. & Cui, J. (2026). A Network-Cascade Framework
+  for Short-Run Production Failure Under Maritime-Energy Chokepoint Disruption.
+  *Mathematics*, 14(10), 1708. https://doi.org/10.3390/math14101708
+- Sharma, M. & Lau, H.C. (2026). Securing the Flow: Maritime Energy Resilience under
+  Correlated and Decision-Dependent Disruptions. arXiv:2605.11990.
 - *Non-Substitutable Chokepoints and Global Supply Chain Disruption* (2026).
