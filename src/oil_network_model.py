@@ -30,7 +30,6 @@ SWITCHED OFF BY DEFAULT (implemented, but found to be wrong or never active)
 """
 
 import numpy as np                      # maths: clip, mean
-import networkx as nx                   # graph library from the lectures
 from oil_model_data import *            # every number the model uses (see that file)
 
 
@@ -105,7 +104,7 @@ ROUTES = {
 
 # Pipelines that feed several routes: all their legs share ONE daily budget.
 # e.g. every route starting "SaudiPipe..." draws from the same 7.0 mb/d.
-SHARED_PIPELINES = {"SaudiPipe": SAUDI_EASTWEST_CAPACITY, "ADCOP": 1.5}
+SHARED_PIPELINES = {"SaudiPipe": SAUDI_EASTWEST_CAPACITY, "ADCOP": ADCOP_CAPACITY}
 
 REGIONS = list(CONSUMPTION_BY_REGION)            # the 10 consuming regions
 REGION_DEMAND = dict(CONSUMPTION_BY_REGION)      # how much oil each region needs, mb/d
@@ -137,16 +136,13 @@ class OilNetworkModel:
         self.min_rate = min_rate                   # a refinery shuts below this share of its capacity (0.55)
         self.restart_days = restart_days           # days a shut refinery takes to restart
 
-        self.G = nx.DiGraph()                      # a directed graph of the network, for reference
-        for r, (o, d, cps, days, _rc) in ROUTES.items():          # for every route...
-            self.G.add_edge(o, d, route=r, chokepoints=cps, days=days)   # ...add an edge producer -> consumer
 
         self.running = {r: 1.0 for r in REGION_DEMAND}     # share of each region's refining that is running (1 = all)
         self.shut_timer = {r: 0 for r in REGION_DEMAND}    # days until shut refineries restart
         self.n_refineries = 12                             # each region is treated as 12 equal refineries
         self.shut_count = {r: 0 for r in REGION_DEMAND}    # how many of those 12 are shut
         self.order_mult = {r: 1.0 for r in REGION_DEMAND}  # hoarding multiplier on demand (1.0 = order exactly what you need)
-        self.push_log = None                               # set to [] to record every push (for tracing only)
+        self.push_log = None                               # set to [] to record every push (used only by debug_trace.py)
 
         if tanker_fleet_days is None:                      # if no fleet size was given...
             base = sum(ORIGIN_SUPPLY.values())             # ...take total world supply...
@@ -220,8 +216,8 @@ class OilNetworkModel:
                 for o in supply_left}
         for o in supply_left:
             supply_left[o] -= spot[o]                      # hold the spot oil back; only contracted oil is left for Stage 1
-        self.last_spot = dict(spot)                        # remember the spot oil (for the trace)
-        self.last_contracted = dict(supply_left)           # remember the contracted oil (for the trace)
+        self.last_spot = dict(spot)                        # remember the spot oil (for the trace tools)
+        self.last_contracted = dict(supply_left)           # remember the contracted oil (for the trace tools)
 
         # ---- Step 3: STAGE 1 - contracted oil, fastest route first ----
         for rname in sorted(ROUTES, key=lambda k: ROUTES[k][3]):   # go through routes from shortest voyage to longest
@@ -230,8 +226,9 @@ class OilNetworkModel:
             if need > 0:
                 push(rname, need)                                  # send as much of it as this route can
 
-        self.last_stage1_flow = dict(route_flow)                   # route flows after Stage 1 (for the trace)
 
+
+        self.last_stage1_flow = dict(route_flow)                   # route flows after Stage 1 (for the trace tools)
         if self.push_log is not None:
             self.push_log.append("STAGE 2")                          # tracing only: mark where Stage 2 starts
 
@@ -247,8 +244,8 @@ class OilNetworkModel:
         FREIGHT = 0.01                                             # bid lost per voyage day (freight cost)
         bids = [(self.premium[ROUTES[k][1]] - FREIGHT * ROUTES[k][3], k)   # NETBACK for every (short region, route to it) pair
                 for k in ROUTES if shortfall[ROUTES[k][1]] > 0]
-        self.last_bids = sorted(bids, reverse=True)                # ONE queue, highest netback first (kept for inspection)
-        self.last_stage1_shortfall = dict(shortfall)               # remember Stage-1 shortfalls (for inspection)
+        self.last_bids = sorted(bids, reverse=True)                # ONE queue, highest netback first (kept for the trace tools)
+        self.last_stage1_shortfall = dict(shortfall)               # Stage-1 shortfalls (for the trace tools)
         for netback, rname in self.last_bids:                      # walk down the queue
             r = ROUTES[rname][1]                                   # the buyer on this route
             if shortfall[r] > 0:                                   # only if that buyer still needs oil...

@@ -106,7 +106,6 @@ P(f"| `m.running` | every region 1.0 | all demand met so far |")
 P(f"| `m.shut_count` | every region 0 | no refineries shut |")
 P(f"| `m.order_mult` | every region 1.0 | ordering exactly what's needed |")
 P(f"| `m.fleet` | {m.fleet:.1f} | tanker capacity, barrel-days = {sum(NM.ORIGIN_SUPPLY.values()):.1f} supply × {D.BASE_VOYAGE_DAYS} days × 1.25 |")
-P(f"| `m.G` | graph, {m.G.number_of_nodes()} nodes, {m.G.number_of_edges()} edges | the routes as a graph, for reference |")
 P(f"| `m.push_log` | None | the recorder — switched on below for this trace |\n")
 
 # ---------------------------------------------------------------------------

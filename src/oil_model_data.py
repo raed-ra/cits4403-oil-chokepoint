@@ -112,6 +112,8 @@ SAUDI_EASTWEST_CAPACITY = 7.0   # [DATA] 2026: second line converted from NGL
                                 # mb/d. NOTE: actual 2026 throughput was lower -
                                 # a drone strike cut 0.7 mb/d (Apr) and Yanbu
                                 # loadings halted (Sep).
+ADCOP_CAPACITY = 1.5            # [DATA] UAE's Abu Dhabi Crude Oil Pipeline to Fujairah,
+                                # on the Gulf of Oman - outside Hormuz (EIA) [S4]
 
 # ======================================================================
 # 5. CONTESTABLE SUPPLY                                      [ASSUMPTION]

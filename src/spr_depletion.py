@@ -43,9 +43,9 @@ def simulate_with_reserve(blockade, reserve_mb=None,
     Returns a dict of daily lists: price, brent, reserve, unserved, drawn.
     """
     m = OilNetworkModel(hoarding=hoarding)                 # fresh model
-    if regional:
+    if regional:                                                        # realistic: one reserve per region
         reserves = {r: REGIONAL_RESERVES[r] * scale for r in REGIONAL_RESERVES}   # each region's own reserve, Mb
-    else:
+    else:                                                               # hypothetical: one pooled reserve
         reserves = {"GLOBAL": (reserve_mb if reserve_mb is not None
                                else SPR_CURRENT) * scale}  # one pooled reserve
     reserve = sum(reserves.values())                       # total remaining
@@ -56,21 +56,21 @@ def simulate_with_reserve(blockade, reserve_mb=None,
 
     for d in range(days):                                  # one loop = one day
         trend = max(0.0, price - prev)                     # price momentum (used only by hoarding)
-        prev = price
+        prev = price                                                    # remember today's price for tomorrow
         unserved, _, _ = m.step(1.0 - blockade, price_trend=trend)   # today's shortfalls (step takes the OPEN share)
 
         short = 0.0                                        # world shortfall AFTER reserves
-        if regional:
+        if regional:                                                    # realistic: each region draws only for itself
             for r, miss in unserved.items():               # each region separately
                 rate = REGIONAL_DRAW_RATE.get(r, 1.0)      # its maximum draw rate
                 draw = min(miss, rate, max(0.0, reserves.get(r, 0.0)))   # need, rate limit, what's left
                 reserves[r] = reserves.get(r, 0.0) - draw  # 1 mb/d for 1 day = 1 Mb out
                 short += max(0.0, miss - draw)             # what the reserve couldn't cover
-        else:
+        else:                                                           # pooled: one draw, wherever the oil is needed
             tot = sum(unserved.values())                   # pooled: one world shortfall
             draw = min(tot, draw_rate, max(0.0, reserves["GLOBAL"]))   # one draw, wherever needed
-            reserves["GLOBAL"] -= draw
-            short = tot - draw
+            reserves["GLOBAL"] -= draw                                  # take it out of the pool
+            short = tot - draw                                          # what the pool could not cover
         reserve = sum(reserves.values())                   # total left
 
         # Price: the market-clearing price for the PHYSICAL shortfall. clear_market()
@@ -85,24 +85,24 @@ def simulate_with_reserve(blockade, reserve_mb=None,
 
         hist["price"].append(price)                        # record the day
         hist["brent"].append(price * BRENT_BASE)           # in $/bbl
-        hist["reserve"].append(max(0.0, reserve))
-        hist["unserved"].append(short)
+        hist["reserve"].append(max(0.0, reserve))                       # reserves left (never shown below 0)
+        hist["unserved"].append(short)                                  # shortfall after reserves
         hist["drawn"].append(draw)                         # (last region's draw - for reference only)
-    return hist
+    return hist                                                         # every day's price, Brent, reserves, shortfall
 
 
 def runway_days(reserve_mb=SPR_CURRENT, draw_rate=SPR_MAX_WITHDRAW):
     """Simple arithmetic: days a reserve lasts at a fixed rate (volume / rate).
     Defaults are the US reserve (285 Mb at 2.7 mb/d)."""
-    return reserve_mb / draw_rate
+    return reserve_mb / draw_rate                                       # e.g. 285 Mb / 2.7 mb/d = 106 days
 
 
 def days_to_price(hist, threshold=PRICE_ALARM):
     """First day Brent reaches `threshold`, or None if it never does."""
     for d, b in enumerate(hist["brent"]):                  # day number and price
-        if b >= threshold:
-            return d
-    return None
+        if b >= threshold:                                              # first day Brent reaches the threshold...
+            return d                                                    # ...return that day number
+    return None                                                         # never reached
 
 
 if __name__ == "__main__":                                 # only when run directly

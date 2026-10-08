@@ -43,10 +43,12 @@ Figures are written to `figures/`.
 │   ├── topology_comparison.py   network metrics vs ER / WS / BA null models
 │   ├── layer_diagrams.py        Layers 2 and 3 drawn as networks
 │   ├── experiment_feedback.py   experimental extension: price feedback
-│   ├── debug_trace.py           debugger-style trace of the real program -> PROGRAM_TRACE.md
 │   ├── trace_model.py           step-by-step printout of one scenario (python trace_model.py 0.7)
+│   ├── debug_trace.py           debugger-style trace of the real program -> PROGRAM_TRACE.md
 │   └── test_model.py            25 correctness and boundary-case checks
 ├── utils/paths.py               lets the notebook find src/ and figures/
+├── HOW_THE_PROGRAM_RUNS.md      walkthrough of one run, function by function
+├── PROGRAM_TRACE.md             every push of one simulated day (made by debug_trace.py)
 ├── data/DATA_AND_SOURCES.md     every figure used, with its source
 ├── notebooks/main_analysis.ipynb   the full analysis (run this)
 ├── figures/                     generated output
@@ -54,7 +56,11 @@ Figures are written to `figures/`.
 ```
 
 Each module also runs on its own, e.g. `python src/network_view.py`.
-All constants live in `src/oil_model_data.py`: change one there and re-run.
+Published data and the main assumptions live in `src/oil_model_data.py`: change one there
+and re-run. The route network (which routes exist, the chokepoints each passes, voyage days)
+and a few behavioural parameters (bid steepness 4, freight factor 0.01, complexity uplift
+0.15, 12 refineries per region, 25% tanker slack, 12% daily price adjustment) are defined in
+the model files, as part of the model's structure.
 
 ## Main findings
 

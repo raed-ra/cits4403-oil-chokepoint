@@ -39,7 +39,7 @@ def simulate_price(blockade, days=240, hoarding=False, reserve_days=0,
         short = sum(unserved.values())              # total world shortfall today
 
         if d < reserve_days:                        # optional single reserve, for a limited window
-            short = max(0.0, short - SPR_MAX_WITHDRAW)
+            short = max(0.0, short - SPR_MAX_WITHDRAW)                  # subtract one 2.7 mb/d reserve from the shortfall
         short = max(0.0, short - sum(REGION_DEMAND.values()) * demand_policy)   # optional demand restraint
 
         # The price that would make demand equal supply. clear_market() already
@@ -54,10 +54,10 @@ def simulate_price(blockade, days=240, hoarding=False, reserve_days=0,
                         for r in REGION_DEMAND)
 
         hist["price"].append(price)                 # record the day
-        hist["unserved"].append(short)
-        hist["demand"].append(base - destroyed)
+        hist["unserved"].append(short)                                  # shortfall after any reserve/restraint
+        hist["demand"].append(base - destroyed)                         # world demand at this price
         hist["hoard"].append(np.mean(list(m.order_mult.values())))   # average hoarding multiplier (1.0 when off)
-    return hist
+    return hist                                                         # every day's price, shortfall, demand, hoarding
 
 
 def shortage_two_views(blockade, days=150):
@@ -72,11 +72,11 @@ def shortage_two_views(blockade, days=150):
     Returns (price index, {region: (demand, physical shortfall, price-driven cut)}).
     """
     m = OilNetworkModel()                                   # fresh model
-    for _ in range(days):
+    for _ in range(days):                                               # run the routing to steady state
         unserved, _, _ = m.step(1.0 - blockade)             # settle the routing (step takes the OPEN share)
     short = sum(unserved.values())                          # total physical shortfall
     price, demand = m.clear_market(sum(REGION_DEMAND.values()) - short)   # price that removes that much demand
-    return price, {r: (REGION_DEMAND[r], unserved[r], REGION_DEMAND[r] - demand[r])
+    return price, {r: (REGION_DEMAND[r], unserved[r], REGION_DEMAND[r] - demand[r])  # (price, {region: (demand, physical shortfall, cut at that price)})
                    for r in REGION_DEMAND}
 
 

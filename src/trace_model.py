@@ -32,7 +32,7 @@ for _ in range(150):                                          # 150 simulated da
 print("\nLAYER 1 - ROUTING  (oil_network_model.py: allocate_flows)\n")
 print(f"Limits today: Hormuz = normal flow x open share = {CHOKEPOINTS['Hormuz'][0]} x {open_frac:.2f} "
       f"= {CHOKEPOINTS['Hormuz'][0]*open_frac:.2f} mb/d.  Straits: no limit.  Canals: Suez 10.0, Panama 3.5.")
-print(f"Shared pipeline budgets: Saudi East-West {SAUDI_EASTWEST_CAPACITY}, ADCOP 1.5 mb/d.\n")
+print(f"Shared pipeline budgets: Saudi East-West {SAUDI_EASTWEST_CAPACITY}, ADCOP {ADCOP_CAPACITY} mb/d.\n")
 
 print("STEP 1 - DOMESTIC FIRST:  take = min(own production, own demand)")
 print(f"  {'region':<12}{'produces':>9}{'demands':>9}{'uses own':>10}{'left to export':>16}{'must import':>13}")

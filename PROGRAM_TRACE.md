@@ -13,22 +13,22 @@ The first thing any part of the program does is `from oil_model_data import *`. 
 | `CIS_EAST_PRODUCTION` | oil_model_data.py : 64 | East Siberia's export-only output | 1.8 |
 | `CHOKEPOINTS` | oil_model_data.py : 77 | (normal flow, capacity) per passage | Hormuz (20.9, 20.9), Malacca (23.7, None), Panama (2.1, 3.5), … |
 | `SAUDI_EASTWEST_CAPACITY` | oil_model_data.py : 110 | Saudi pipeline budget, mb/d | 7.0 |
-| `CONTESTABLE_FRACTION` | oil_model_data.py : 121 | share of each exporter's surplus sold spot | MidEast 0.35, NAmerica 0.6, Africa 0.9, … |
-| `MIN_OPERATING_RATE` | oil_model_data.py : 138 | refinery minimum running rate | 0.55 |
-| `BASE_VOYAGE_DAYS` | oil_model_data.py : 142 | typical voyage, for sizing the tanker fleet | 20 |
-| `REGION_NCI` | oil_model_data.py : 144 | refinery complexity (Nelson index) | NAmerica 11.0, China 8.0, Africa 5.0, … |
-| `PRICE_ELASTICITY` | oil_model_data.py : 156 | demand response to price | NAmerica -0.05, China -0.12, Africa -0.25, … |
-| `REGIONAL_RESERVES` | oil_model_data.py : 178 | strategic reserve per region, Mb | China 1400.0, NAmerica 285.0, … |
-| `REGIONAL_DRAW_RATE` | oil_model_data.py : 188 | max reserve draw, mb/d | China 4.0, NAmerica 2.7, … |
+| `CONTESTABLE_FRACTION` | oil_model_data.py : 123 | share of each exporter's surplus sold spot | MidEast 0.35, NAmerica 0.6, Africa 0.9, … |
+| `MIN_OPERATING_RATE` | oil_model_data.py : 140 | refinery minimum running rate | 0.55 |
+| `BASE_VOYAGE_DAYS` | oil_model_data.py : 144 | typical voyage, for sizing the tanker fleet | 20 |
+| `REGION_NCI` | oil_model_data.py : 146 | refinery complexity (Nelson index) | NAmerica 11.0, China 8.0, Africa 5.0, … |
+| `PRICE_ELASTICITY` | oil_model_data.py : 158 | demand response to price | NAmerica -0.05, China -0.12, Africa -0.25, … |
+| `REGIONAL_RESERVES` | oil_model_data.py : 180 | strategic reserve per region, Mb | China 1400.0, NAmerica 285.0, … |
+| `REGIONAL_DRAW_RATE` | oil_model_data.py : 190 | max reserve draw, mb/d | China 4.0, NAmerica 2.7, … |
 
 Then `oil_network_model.py` is imported. Its top part **builds four more tables from that data** (still no simulation):
 
 | Variable | File : line | How it's built | Value |
 |---|---|---|---|
-| `ROUTES` | oil_network_model.py : 46 | typed in: 37 routes, each (producer, consumer, passages, days, own limit) | e.g. `"ME->China": ('MidEast_P', 'China', ['Hormuz', 'Malacca'], 20, None)` |
-| `SHARED_PIPELINES` | oil_network_model.py : 108 | pipeline budgets | {'SaudiPipe': 7.0, 'ADCOP': 1.5} |
-| `REGION_DEMAND` | oil_network_model.py : 111 | a copy of CONSUMPTION_BY_REGION | China 16.4, … |
-| `ORIGIN_SUPPLY` | oil_network_model.py : 112 | each region's production, renamed `<region>_P`; East Siberia split out of CIS | CIS_P 12.0 (13.8 − 1.8), CISEast_P 1.8, MidEast_P 31.0 |
+| `ROUTES` | oil_network_model.py : 45 | typed in: 37 routes, each (producer, consumer, passages, days, own limit) | e.g. `"ME->China": ('MidEast_P', 'China', ['Hormuz', 'Malacca'], 20, None)` |
+| `SHARED_PIPELINES` | oil_network_model.py : 107 | pipeline budgets | {'SaudiPipe': 7.0, 'ADCOP': 1.5} |
+| `REGION_DEMAND` | oil_network_model.py : 110 | a copy of CONSUMPTION_BY_REGION | China 16.4, … |
+| `ORIGIN_SUPPLY` | oil_network_model.py : 111 | each region's production, renamed `<region>_P`; East Siberia split out of CIS | CIS_P 12.0 (13.8 − 1.8), CISEast_P 1.8, MidEast_P 31.0 |
 
 And `production_cascade.py` stores the Layer 3 tables: `SECTORS` (line 24), `OIL_DEPENDENCE` (line 33), `DEPENDS_ON` (line 43), `OPERABLE_MIN` = 0.45 (line 51).
 
@@ -48,7 +48,7 @@ for _ in range(150):
 
 ## Part 3 — Building the model: `m = OilNetworkModel()`
 
-`class OilNetworkModel` is at oil_network_model.py : 117. Creating `m` runs its `__init__`, which stores these values **on the object** — `m`'s memory:
+`class OilNetworkModel` is at oil_network_model.py : 116. Creating `m` runs its `__init__`, which stores these values **on the object** — `m`'s memory:
 
 | Attribute | Value after construction | Meaning |
 |---|---|---|
@@ -60,12 +60,11 @@ for _ in range(150):
 | `m.shut_count` | every region 0 | no refineries shut |
 | `m.order_mult` | every region 1.0 | ordering exactly what's needed |
 | `m.fleet` | 2632.5 | tanker capacity, barrel-days = 105.3 supply × 20 days × 1.25 |
-| `m.G` | graph, 14 nodes, 26 edges | the routes as a graph, for reference |
 | `m.push_log` | None | the recorder — switched on below for this trace |
 
 ## Part 4 — Day 1: `m.step(0.30)` calls `m.allocate_flows(0.30)`
 
-`step` is at oil_network_model.py : 294 and `allocate_flows` at line 160; `push` is defined inside it at line 183. `allocate_flows` first creates its **working tallies** for the day — fresh every day:
+`step` is at oil_network_model.py : 291 and `allocate_flows` at line 156; `push` is defined inside it at line 179. `allocate_flows` first creates its **working tallies** for the day — fresh every day:
 
 | Tally | Starts as | Meaning |
 |---|---|---|

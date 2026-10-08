@@ -210,7 +210,24 @@ a test. The other passages are.
 Crude share of each passage's oil traffic, used to compare crude with crude:
 Hormuz ~73% [S16], Bab el-Mandeb ~72% [S1], Suez ~52% [S19], Panama ~5% [S20].
 
-## 10. Collected but not used
+## 10. Modelling parameters defined in the code — [ASSUMPTION]
+
+These are part of the model's structure rather than published data, so they are set in the
+model files, not in `oil_model_data.py`:
+
+| Parameter | Value | File |
+|---|---|---|
+| The 37 routes: chokepoints passed and voyage days | geographic estimates | `oil_network_model.py` (`ROUTES`) |
+| Russia's Baltic route limit | 2.5 mb/d | `oil_network_model.py` (`ROUTES`) |
+| Bid steepness | 4 (premium = 1 + 4 × (short/demand)²) | `oil_network_model.py` |
+| Freight factor | 0.01 per voyage day | `oil_network_model.py` |
+| Complexity uplift strength | up to 15% | `oil_network_model.py` |
+| Refineries per region | 12 | `oil_network_model.py` |
+| Tanker fleet slack | 25% | `oil_network_model.py` |
+| Daily price adjustment | 12% of the gap to the clearing price | `price_dynamics.py`, `spr_depletion.py` |
+| Price-feedback cap (extension) | 20% of demand | `experiment_feedback.py` |
+
+## 11. Collected but not used
 
 Persian Gulf crude grades (API gravity, sulphur), the heavy/medium/light
 classification, and country-level production rankings were gathered for a
