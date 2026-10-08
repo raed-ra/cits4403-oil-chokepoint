@@ -83,7 +83,7 @@ the model files, as part of the model's structure.
    no reserves, ~$151 with realistic regional reserves, ~$81 if all could be pooled.
    About 500 Mb (US, Europe, India) is never drawn.
 6. **The real network is more robust than random graphs** of the same size:
-   removing its most central chokepoint costs 5.6% of capacity against 12–27%.
+   removing its most central chokepoint costs 5.6% of capacity against 12–24% (averages over 200 random graphs).
 7. **Volatility matters.** On-off disruption does ~31% more damage than a smooth
    ramp with the same total exposure; the order of events alone makes no difference.
 
