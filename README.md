@@ -43,6 +43,8 @@ Figures are written to `figures/`.
 │   ├── topology_comparison.py   network metrics vs ER / WS / BA null models
 │   ├── layer_diagrams.py        Layers 2 and 3 drawn as networks
 │   ├── experiment_feedback.py   experimental extension: price feedback
+│   ├── report_maps.py           the two large network maps in the report (Figures 2-3)
+│   ├── demo.py                  live demo: any closure, one screen (python demo.py 0.6)
 │   ├── trace_model.py           step-by-step printout of one scenario (python trace_model.py 0.7)
 │   ├── debug_trace.py           debugger-style trace of the real program -> PROGRAM_TRACE.md
 │   └── test_model.py            25 correctness and boundary-case checks
@@ -55,7 +57,8 @@ Figures are written to `figures/`.
 └── requirements.txt
 ```
 
-Each module also runs on its own, e.g. `python src/network_view.py`.
+Each module also runs on its own, e.g. `python src/network_view.py`. For a live demo,
+`python src/demo.py 0.6` (Hormuz 60% closed) or `python src/demo.py 0.7 1.0` (plus Bab el-Mandeb).
 Published data and the main assumptions live in `src/oil_model_data.py`: change one there
 and re-run. The route network (which routes exist, the chokepoints each passes, voyage days)
 and a few behavioural parameters (bid steepness 4, freight factor 0.01, complexity uplift
